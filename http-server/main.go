@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/TikTokTechImmersion/assignment_demo_2023/http-server/kitex_gen/rpc"
 	"github.com/TikTokTechImmersion/assignment_demo_2023/http-server/kitex_gen/rpc/imservice"
 	"github.com/TikTokTechImmersion/assignment_demo_2023/http-server/proto_gen/api"
+	"github.com/cloudwego/hertz"
 	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/utils"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/cloudwego/hertz/pkg/server/httpx"
 	"github.com/cloudwego/kitex/client"
 	etcd "github.com/kitex-contrib/registry-etcd"
 )
@@ -23,31 +24,36 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	cli = imservice.MustNewClient("demo.rpc.server",
 		client.WithResolver(r),
 		client.WithRPCTimeout(1*time.Second),
 		client.WithHostPorts("rpc-server:8888"),
 	)
 
-	h := server.Default(server.WithHostPorts("0.0.0.0:8080"))
+	router := hertz.NewRouter()
 
-	h.GET("/ping", func(c context.Context, ctx *app.RequestContext) {
-		ctx.JSON(consts.StatusOK, utils.H{"message": "pong"})
+	router.GET("/ping", func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		app.JSON(w, consts.StatusOK, map[string]interface{}{"message": "pong"})
 	})
 
-	h.POST("/api/send", sendMessage)
-	h.GET("/api/pull", pullMessage)
+	router.POST("/api/send", sendMessage)
+	router.GET("/api/pull", pullMessage)
 
-	h.Spin()
+	server := httpx.Server{
+		Handler: router,
+	}
+
+	log.Fatal(server.ListenAndServe(":8080"))
 }
 
-func sendMessage(ctx context.Context, c *app.RequestContext) {
+func sendMessage(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	var req api.SendRequest
-	err := c.Bind(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, "Failed to parse request body: %v", err)
+	if err := app.ParseJSONRequest(r, &req); err != nil {
+		app.ErrorResponse(w, consts.StatusBadRequest, "Failed to parse request body: %v", err)
 		return
 	}
+
 	resp, err := cli.Send(ctx, &rpc.SendRequest{
 		Message: &rpc.Message{
 			Chat:   req.Chat,
@@ -56,19 +62,20 @@ func sendMessage(ctx context.Context, c *app.RequestContext) {
 		},
 	})
 	if err != nil {
-		c.String(consts.StatusInternalServerError, err.Error())
+		app.ErrorResponse(w, consts.StatusInternalServerError, err.Error())
+		return
 	} else if resp.Code != 0 {
-		c.String(consts.StatusInternalServerError, resp.Msg)
-	} else {
-		c.Status(consts.StatusOK)
+		app.ErrorResponse(w, consts.StatusInternalServerError, resp.Msg)
+		return
 	}
+
+	app.JSON(w, consts.StatusOK, nil)
 }
 
-func pullMessage(ctx context.Context, c *app.RequestContext) {
+func pullMessage(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	var req api.PullRequest
-	err := c.Bind(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, "Failed to parse request body: %v", err)
+	if err := app.ParseQuery(r, &req); err != nil {
+		app.ErrorResponse(w, consts.StatusBadRequest, "Failed to parse request parameters: %v", err)
 		return
 	}
 
@@ -79,12 +86,13 @@ func pullMessage(ctx context.Context, c *app.RequestContext) {
 		Reverse: &req.Reverse,
 	})
 	if err != nil {
-		c.String(consts.StatusInternalServerError, err.Error())
+		app.ErrorResponse(w, consts.StatusInternalServerError, err.Error())
 		return
 	} else if resp.Code != 0 {
-		c.String(consts.StatusInternalServerError, resp.Msg)
+		app.ErrorResponse(w, consts.StatusInternalServerError, resp.Msg)
 		return
 	}
+
 	messages := make([]*api.Message, 0, len(resp.Messages))
 	for _, msg := range resp.Messages {
 		messages = append(messages, &api.Message{
@@ -94,9 +102,5 @@ func pullMessage(ctx context.Context, c *app.RequestContext) {
 			SendTime: msg.SendTime,
 		})
 	}
-	c.JSON(consts.StatusOK, &api.PullResponse{
-		Messages:   messages,
-		HasMore:    resp.GetHasMore(),
-		NextCursor: resp.GetNextCursor(),
-	})
-}
+
+	app.JSON(w, consts
